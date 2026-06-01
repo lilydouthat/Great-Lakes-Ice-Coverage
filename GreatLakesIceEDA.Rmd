@@ -1,0 +1,289 @@
+---
+title: "Great Lakes ICA Initial Analysis Plan/EDA"
+author: "Brandon Pate"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+### Initial Analysis Plan
+
+#### Research Question
+Looking at the daily data for ice coverage in the Great Lakes, is there any trend or pattern that shows a change in the amount of ice in the lakes? We are interested in aggregating the data for each year, to explore the change between different seasons. As a result of climate change, there is a concern that there is periodically less ice on Earth. This possibility will be explored on the data from the Great Lakes, investigating if there is a significant decrease in the amount of ice. 
+
+#### Initial Data Manipulation
+The existence of NAs on a lot of days raises multiple questions that will affect how we treat the data. First, the starting day for the measurements, and the magnitude of this first measurement seem to vary significantly from year to year, especially comparing the early years to later data. In these early years, the first measurement can be very high, which seems unlikely that such a rise in ice coverage happened from one day to the next. This could mean that in early years, the data started being recorded later, or a less accurate measurement instrument that may not detect lower percentages of ice as well as modern instruments. Therefore, an interpolation of data will be necessary in these years when the first measurement is very high. 
+
+Another important change will be aggregating the daily data into one year to reflect the amount of ice the lakes had in one year, so that a year to year comparison can be made. Some possible methods are: 
+
+-- Calculating the area under the curve of daily ice coverage for each year. This metric would reflect both the duration of the season when there was ice on        the lakes, as well as the magnitude of the measurements through the season.
+
+-- Averaging the measurements for every year.
+
+-- Calculating the maximum value of ice coverage for each year. 
+
+#### Possible Statistical Methods
+Once daily data has been aggregated into data by year, we will attempt to answer our research question, trying different methods:
+
+-- Linear regression: in the case that the ice coverage as a function of year seems to have a linear relationship, linear regression would assess the existence of this relationship, and what is the yearly decrease.
+
+-- ARIMA: since we are working with time series data, ARIMA would be a useful tool to detect seasonality in the data, as well as some trends or patterns in the data through time.
+
+
+### EDA
+```{r}
+library(tidyverse)
+ice = read.csv("greatlakesicedata.csv") 
+```
+
+#### Filling in Missing Values at Begining of Years
+```{r}
+ice_filled <- ice
+threshold <- 5 #only fill in data if the first observation is more than 5
+x_days <- 10 #fill in a max of 10 days
+
+year_cols <- grep("^X[0-9]{4}$", names(ice_filled), value = TRUE)
+
+for (col in year_cols) {
+
+  vals <- ice_filled[[col]]
+
+  first_idx <- which(!is.na(vals))[1]
+
+  if (is.na(first_idx)) next
+
+  first_val <- vals[first_idx]
+
+  if (first_val <= threshold) next
+
+  end_idx <- min(first_idx + x_days, nrow(ice_filled))
+
+  future_vals <- vals[first_idx:end_idx]
+
+  avg_increase <- mean(diff(future_vals), na.rm = TRUE)
+
+  if (is.na(avg_increase) || avg_increase <= 0) next
+
+  current_val <- first_val - avg_increase
+  idx <- first_idx - 1
+
+  while (idx >= 1 && is.na(ice_filled[[col]][idx]) && current_val >= 1) {
+    ice_filled[[col]][idx] <- current_val
+
+    current_val <- current_val - avg_increase
+    idx <- idx - 1
+  }
+}
+```
+
+#### Pivot Longer
+```{r}
+ice_longer = ice_filled %>%  pivot_longer(!X,  names_to = "Year", values_to = "Ice") %>% 
+  rename(Day = X) %>% mutate(Year = as.numeric(str_sub(Year, start=2)), Day = as.Date(paste0(Day, "-", Year), format = "%d-%B-%Y")) %>%
+  arrange(Year)
+```
+
+#### Visualizing Yearly Trends
+
+```{r}
+ice_longer %>%
+  mutate(
+    # assigns all the years to either 1999 or 2000 so they are on the same part of the x-axis
+    plot_date = if_else(month(Day) >= 11, 
+                        update(Day, year = 1999), 
+                        update(Day, year = 2000))
+  ) %>%
+  arrange(Year, plot_date) %>% 
+  ggplot(aes(x=plot_date, y=Ice, color = Year, group=Year)) +
+  geom_path(alpha=0.5, linewidth=1) +
+  scale_color_viridis_c() +
+scale_x_date(
+    date_labels = "%b %d", 
+    date_breaks = "2 months"
+  ) +
+  labs(
+    title = "Great Lakes Ice Seasonal Ice Coverage",
+    x = "Month and Day",
+    y = "Ice Coverage Percentage"
+  ) +
+  theme_minimal()
+```
+
+It is hard to tell, but there seems to be more yellow/green (later years) on the bottom so they have lower ice coverage. This could be showing global warming trends. 
+
+### Calculating Sum of Ice Coverage Per Year (Area Under Curve approximation)
+
+We need to work on interpolating missing data at the beginning of the seasons. For now we will calculate the AUC without doing that to get a rough idea of the data we have. 
+
+```{r}
+auc = ice_longer %>% group_by(Year) %>% summarize(AUC = sum(Ice,na.rm = TRUE))
+
+ggplot(aes(x=Year, y=AUC), data=auc) +
+  geom_point()+
+  geom_smooth(method="loess")
+```
+
+There there is a slight decreasing trend.
+
+#### Calculating correlation with one lag (previous year)
+```{r}
+auc.1 = c(NA, auc$AUC)
+auc.0 = c(auc$AUC, NA)
+cor(auc.1, auc.0, use = "c")
+plot(auc.0, auc.1)
+```
+
+We see a weak positive correlation so it the AUC at year t-1 increased the AUC at year t will be slightly more likely to increase (same pattern for decrease). Basically the trend is slightly more likely to continue in the same direction it's going.
+
+#### AutoCorrelation Function
+```{r}
+acf(auc$AUC)
+```
+
+#### Repeating after differencing
+```{r}
+auc_diff = diff(auc$AUC, differences=1)
+plot(auc_diff)
+```
+
+Now see no trend in the data.
+
+#### Correlation with 1 lag (differenced data)
+```{r}
+diff.1 = c(NA, auc_diff)
+diff.0 = c(auc_diff, NA)
+cor(diff.1, diff.0, use = "c")
+plot(diff.0, diff.1)
+```
+
+We see a stronger (but now negative) correlation in between lags in the data.
+
+#### AutoCorrelation Function
+```{r}
+acf(auc_diff)
+```
+
+Now it looks like 1 lag is significant.
+
+#### Regular Linear Regression
+```{r}
+auc_fit = lm(AUC ~ Year, data=auc)
+summary(auc_fit)
+```
+
+#### Linear Regression Accounting for Effect of Previous Year
+```{r}
+auc_prev = auc %>% mutate(AUC_prev = lag(AUC))
+```
+
+```{r}
+auc_prev_fit = lm(AUC ~ Year + AUC_prev, data = auc_prev)
+summary(auc_prev_fit)
+```
+
+
+### Average Ice Coverage
+```{r}
+Ice_Ave = ice_longer %>% group_by(Year) %>% summarize(Mean = mean(Ice,na.rm = TRUE))
+
+ggplot(aes(x=Year, y=Mean), data=Ice_Ave) +
+  geom_point()+
+  geom_smooth(method="loess")
+```
+
+There seems to be more of a decrease in mean as years go on vs AUC.
+
+#### Applying differencing
+```{r}
+ave_diff = diff(Ice_Ave$Mean, differences=1)
+plot(ave_diff)
+```
+
+We don't see a pattern in the data now.
+
+#### Correlation with 1 lag
+```{r}
+diff.1 = c(NA, ave_diff)
+diff.0 = c(ave_diff, NA)
+cor(diff.1, diff.0, use = "c")
+plot(diff.0, diff.1)
+```
+
+We again see a moderate negative correlation with one lag.
+
+#### ACF
+```{r}
+acf(ave_diff)
+```
+
+Again it looks like one lag is significant.
+
+#### Regression Model of Average Ice Coverage with Year previous year's Average Ice as Predictors
+
+```{r}
+ave_prev = Ice_Ave %>% mutate(Ave_prev = lag(Mean))
+```
+
+```{r}
+ave_prev_fit = lm(Mean ~ Year + Ave_prev, data = ave_prev)
+summary(ave_prev_fit)
+```
+
+### Max Ice Coverage
+```{r}
+Ice_Max = ice_longer %>% group_by(Year) %>% summarize(Max = max(Ice,na.rm = TRUE))
+
+ggplot(aes(x=Year, y=Max), data=Ice_Max) +
+  geom_point()+
+  geom_smooth(method="loess")
+```
+
+There is also a decreasing trend in max ice coverage as years go on.
+
+#### Applying differencing
+```{r}
+max_diff = diff(Ice_Max$Max, differences=1)
+plot(max_diff)
+```
+
+We don't see a pattern in the data now.
+
+#### Correlation with 1 lag
+```{r}
+diff.1 = c(NA, max_diff)
+diff.0 = c(max_diff, NA)
+cor(diff.1, diff.0, use = "c")
+plot(diff.0, diff.1)
+```
+
+We again see a moderate negative correlation with one lag.
+
+#### ACF
+```{r}
+acf(max_diff)
+```
+
+Again it looks like one lag is significant.
+
+#### Regression Model of Average Ice Coverage with Year previous year's Average Ice as Predictors
+
+```{r}
+max_prev = Ice_Max %>% mutate(Max_prev = lag(Max))
+```
+
+```{r}
+max_prev_fit = lm(Max ~ Year + Max_prev, data = max_prev)
+summary(max_prev_fit)
+```
+
+### Comparing the models
+```{r}
+summary(auc_prev_fit)
+summary(ave_prev_fit)
+summary(max_prev_fit)
+```
+
+The model using Average Ice Coverage had a much higher Adjusted R-Squared (0.3 vs 0.1 and 0.06). This means that using Average Ice Coverage produces a better fit. All models do show the same thing that there is a significant decreasing trend in Ice Coverage over time.
+
